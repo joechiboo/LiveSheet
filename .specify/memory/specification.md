@@ -99,6 +99,29 @@
 - 開啟特定的 Sheet 進行編輯
 - （未來）刪除或重新命名 Sheet
 
+### 2.6 情境：查詢歷程記錄（Phase 3）
+
+**情境描述**：
+- Alice 發現 Cell(1,2) 的價格從 100 變成了 200
+- 她想知道是誰在什麼時候修改的，以及修改前的值
+
+**預期行為**：
+1. 點擊 Cell(1,2)，選擇「檢視歷程」
+2. 看到該儲存格的完整修改歷史：
+   ```
+   2025-11-06 10:05 - Bob 將值從 '100' 改為 '200'
+   2025-11-06 09:30 - Alice 將值從 null 改為 '100'
+   ```
+3. 也可以查看整個 Sheet 的修改時間軸
+4. 可以篩選特定使用者的修改記錄
+
+**驗收標準**：
+- ✅ 可查詢特定 Cell 的修改歷史
+- ✅ 可查詢整個 Sheet 的修改歷史
+- ✅ 可查詢特定使用者的所有編輯
+- ✅ 歷程顯示包含：時間、使用者、修改前值、修改後值
+- ✅ 支援時間範圍篩選
+
 ---
 
 ## 3. 功能需求
@@ -168,6 +191,33 @@
 - **FR-905**：JWT Token 驗證
 - **FR-906**：權限管理（Owner/Editor/Viewer）
 
+### 3.5 歷程記錄（Audit Log）
+
+#### 3.5.1 資料記錄
+- **FR-1001**：每次儲存格更新時自動記錄到 CellHistory 表
+- **FR-1002**：記錄修改前值（OldValue）和修改後值（NewValue）
+- **FR-1003**：記錄修改者（UpdatedBy）和修改時間（UpdatedAt）
+- **FR-1004**：支援查詢歷程記錄的分頁功能
+
+#### 3.5.2 查詢功能
+- **FR-1101**：查詢特定 Sheet 的所有修改歷程
+- **FR-1102**：查詢特定 Cell 的修改歷程（時間倒序）
+- **FR-1103**：查詢特定使用者的所有編輯記錄
+- **FR-1104**：支援時間範圍篩選（startDate、endDate）
+- **FR-1105**：支援使用者篩選（userId）
+
+#### 3.5.3 UI 呈現（Phase 3）
+- **FR-1201**：Sheet 編輯頁顯示「檢視歷程」按鈕
+- **FR-1202**：歷程記錄彈窗，顯示修改時間軸
+- **FR-1203**：點擊特定儲存格可查看該格的修改歷史
+- **FR-1204**：顯示格式：「Bob 在 10:05 將 Cell(1,2) 從 '100' 改為 '200'」
+- **FR-1205**：（未來）支援從歷程還原特定版本
+
+#### 3.5.4 資料管理
+- **FR-1301**：資料保留策略（如保留 90 天）
+- **FR-1302**：定期清理舊歷程記錄（避免資料表過大）
+- **FR-1303**：重要 Sheet 可設定永久保留歷程
+
 ---
 
 ## 4. 技術規格
@@ -212,6 +262,10 @@
          │  └────────────────┘  │
          │  ┌────────────────┐  │
          │  │  Cells Table   │  │
+         │  └────────────────┘  │
+         │  ┌────────────────┐  │
+         │  │ CellHistory    │  │
+         │  │ (Phase 3)      │  │
          │  └────────────────┘  │
          └──────────────────────┘
 ```
@@ -262,6 +316,50 @@ CREATE INDEX IX_Cells_SheetId ON Cells(SheetId);
 - 複合主鍵 (SheetId, RowIndex, ColIndex) 確保唯一性
 - ON DELETE CASCADE：刪除 Sheet 時自動刪除相關 Cells
 - 索引優化：SheetId 上的索引加速查詢
+
+#### 4.2.3 CellHistory 表（歷程記錄）
+```sql
+CREATE TABLE CellHistory (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    SheetId UNIQUEIDENTIFIER NOT NULL,
+    RowIndex INT NOT NULL,
+    ColIndex INT NOT NULL,
+    OldValue NVARCHAR(MAX),
+    NewValue NVARCHAR(MAX),
+    UpdatedBy NVARCHAR(100) NOT NULL,
+    UpdatedAt DATETIME2 NOT NULL DEFAULT GETDATE(),
+    FOREIGN KEY (SheetId) REFERENCES Sheets(Id) ON DELETE CASCADE
+);
+
+CREATE INDEX IX_CellHistory_SheetId ON CellHistory(SheetId);
+CREATE INDEX IX_CellHistory_Cell ON CellHistory(SheetId, RowIndex, ColIndex);
+CREATE INDEX IX_CellHistory_UpdatedBy ON CellHistory(UpdatedBy);
+CREATE INDEX IX_CellHistory_UpdatedAt ON CellHistory(UpdatedAt DESC);
+```
+
+**欄位說明**：
+- `Id`: 歷程記錄唯一識別碼（自動遞增）
+- `SheetId`: 所屬 Sheet ID
+- `RowIndex`: 列索引
+- `ColIndex`: 行索引
+- `OldValue`: 修改前的值
+- `NewValue`: 修改後的值
+- `UpdatedBy`: 修改者名稱
+- `UpdatedAt`: 修改時間
+
+**設計考量**：
+- 每次儲存格更新都會新增一筆歷程記錄
+- 支援查詢特定 Sheet 的所有修改歷史
+- 支援查詢特定 Cell 的修改歷史
+- 支援查詢特定使用者的所有編輯記錄
+- 索引優化：支援多種查詢模式
+- 資料保留策略：可設定定期清理舊資料（如保留 90 天）
+
+**使用場景**：
+- 追蹤誰在什麼時間修改了什麼
+- 審計用途（Audit Trail）
+- 資料還原參考
+- 衝突分析
 
 ### 4.3 API 規格
 
@@ -316,6 +414,93 @@ CREATE INDEX IX_Cells_SheetId ON Cells(SheetId);
     "value": "Price",
     "updatedAt": "2025-11-06T10:01:00Z",
     "updatedBy": "Bob"
+  }
+]
+```
+
+**GET /api/sheets/{id}/history**
+- 用途：取得特定 Sheet 的所有修改歷程
+- 查詢參數：
+  - `limit`: 限制回傳筆數（預設 100）
+  - `offset`: 分頁偏移量
+  - `userId`: 篩選特定使用者的修改（可選）
+  - `startDate`: 起始時間（可選）
+  - `endDate`: 結束時間（可選）
+- 回應：
+```json
+{
+  "total": 250,
+  "items": [
+    {
+      "id": 1,
+      "rowIndex": 1,
+      "colIndex": 2,
+      "oldValue": "100",
+      "newValue": "200",
+      "updatedBy": "Bob",
+      "updatedAt": "2025-11-06T10:05:30Z"
+    },
+    {
+      "id": 2,
+      "rowIndex": 0,
+      "colIndex": 0,
+      "oldValue": null,
+      "newValue": "Product",
+      "updatedBy": "Alice",
+      "updatedAt": "2025-11-06T10:00:00Z"
+    }
+  ]
+}
+```
+
+**GET /api/sheets/{sheetId}/cells/{row}/{col}/history**
+- 用途：取得特定儲存格的修改歷程
+- 查詢參數：
+  - `limit`: 限制回傳筆數（預設 50）
+- 回應：
+```json
+[
+  {
+    "id": 5,
+    "oldValue": "150",
+    "newValue": "200",
+    "updatedBy": "Bob",
+    "updatedAt": "2025-11-06T10:05:30Z"
+  },
+  {
+    "id": 3,
+    "oldValue": "100",
+    "newValue": "150",
+    "updatedBy": "Alice",
+    "updatedAt": "2025-11-06T10:02:15Z"
+  },
+  {
+    "id": 1,
+    "oldValue": null,
+    "newValue": "100",
+    "updatedBy": "Alice",
+    "updatedAt": "2025-11-06T10:00:00Z"
+  }
+]
+```
+
+**GET /api/history/user/{userId}**
+- 用途：取得特定使用者的所有編輯歷程（跨 Sheets）
+- 查詢參數：
+  - `limit`: 限制回傳筆數（預設 100）
+  - `sheetId`: 篩選特定 Sheet（可選）
+- 回應：
+```json
+[
+  {
+    "id": 10,
+    "sheetId": "guid-1",
+    "sheetName": "Q1 Sales",
+    "rowIndex": 2,
+    "colIndex": 3,
+    "oldValue": "50",
+    "newValue": "60",
+    "updatedAt": "2025-11-06T11:00:00Z"
   }
 ]
 ```
@@ -568,23 +753,33 @@ T=200ms: Alice 收到 Bob 的更新，Cell(1,1) 變成 "200"
 
 ---
 
-### Phase 3: 衝突處理與優化
-**目標**：處理極端情況，提升穩定性
+### Phase 3: 衝突處理、歷程記錄與優化
+**目標**：處理極端情況，加入歷程記錄功能，提升穩定性
 
-**任務**：
+**後端任務**：
+- [ ] 建立 CellHistory 表
+- [ ] UpdateCell 時自動記錄歷程（OldValue → NewValue）
+- [ ] 實作歷程查詢 API（Sheet 層級、Cell 層級、User 層級）
 - [ ] 同時編輯同一格的衝突提示
-- [ ] 顯示「誰正在編輯」（Presence）
 - [ ] 效能優化（批次更新、Debounce）
 - [ ] 錯誤日誌記錄
-- [ ] 單元測試（Hub 方法）
+- [ ] 單元測試（Hub 方法、歷程記錄）
+
+**前端任務**：
+- [ ] Sheet 編輯頁加入「檢視歷程」按鈕
+- [ ] 歷程記錄彈窗元件（顯示修改時間軸）
+- [ ] 點擊儲存格查看該格的修改歷史
+- [ ] 顯示「誰正在編輯」（Presence）
 - [ ] E2E 測試（Playwright）
 
 **驗收標準**：
 - ✅ 5 人同時編輯流暢
 - ✅ 衝突有清楚提示
+- ✅ 可查詢 Sheet 和 Cell 的修改歷程
+- ✅ 歷程記錄顯示清楚（時間、使用者、變更內容）
 - ✅ 核心功能有測試覆蓋
 
-**預估時間**：3-4 天
+**預估時間**：4-5 天
 
 ---
 
@@ -596,7 +791,8 @@ T=200ms: Alice 收到 Bob 的更新，Cell(1,1) 變成 "200"
 - [ ] 儲存格格式化（數字、日期）
 - [ ] 虛擬捲動（支援大表格）
 - [ ] 匯出 CSV/Excel
-- [ ] 版本歷史
+- [ ] 從歷程記錄還原特定版本（基於 Phase 3 的歷程記錄）
+- [ ] 歷程記錄的資料保留策略與自動清理
 
 ---
 
@@ -634,10 +830,12 @@ T=200ms: Alice 收到 Bob 的更新，Cell(1,1) 變成 "200"
 - 🔮 篩選與排序
 
 ### 8.3 資料管理
-- 🔮 版本歷史與還原
+- ✅ 歷程記錄（Phase 3 已規劃）
+- 🔮 從歷程還原特定版本（Phase 4）
 - 🔮 匯入 CSV/Excel
 - 🔮 匯出 PDF
 - 🔮 資料驗證（下拉選單、數值範圍）
+- 🔮 歷程記錄的進階篩選（多條件組合查詢）
 
 ### 8.4 效能優化
 - 🔮 Redis 快取熱門 Sheets
@@ -737,6 +935,25 @@ CREATE TABLE Cells (
 -- 建立索引
 CREATE INDEX IX_Cells_SheetId ON Cells(SheetId);
 
+-- 建立 CellHistory 表（歷程記錄）
+CREATE TABLE CellHistory (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    SheetId UNIQUEIDENTIFIER NOT NULL,
+    RowIndex INT NOT NULL,
+    ColIndex INT NOT NULL,
+    OldValue NVARCHAR(MAX),
+    NewValue NVARCHAR(MAX),
+    UpdatedBy NVARCHAR(100) NOT NULL,
+    UpdatedAt DATETIME2 NOT NULL DEFAULT GETDATE(),
+    FOREIGN KEY (SheetId) REFERENCES Sheets(Id) ON DELETE CASCADE
+);
+
+-- 建立 CellHistory 索引
+CREATE INDEX IX_CellHistory_SheetId ON CellHistory(SheetId);
+CREATE INDEX IX_CellHistory_Cell ON CellHistory(SheetId, RowIndex, ColIndex);
+CREATE INDEX IX_CellHistory_UpdatedBy ON CellHistory(UpdatedBy);
+CREATE INDEX IX_CellHistory_UpdatedAt ON CellHistory(UpdatedAt DESC);
+
 -- 插入測試資料
 DECLARE @SheetId UNIQUEIDENTIFIER = NEWID();
 
@@ -749,6 +966,13 @@ INSERT INTO Cells (SheetId, RowIndex, ColIndex, Value, UpdatedBy) VALUES
 (@SheetId, 1, 0, 'Apple', 'Alice'),
 (@SheetId, 1, 1, '100', 'Alice'),
 (@SheetId, 1, 2, '50', 'Bob');
+
+-- 插入測試歷程記錄
+INSERT INTO CellHistory (SheetId, RowIndex, ColIndex, OldValue, NewValue, UpdatedBy, UpdatedAt) VALUES
+(@SheetId, 1, 1, NULL, '100', 'Alice', DATEADD(MINUTE, -10, GETDATE())),
+(@SheetId, 1, 1, '100', '120', 'Bob', DATEADD(MINUTE, -5, GETDATE())),
+(@SheetId, 1, 2, NULL, '30', 'Bob', DATEADD(MINUTE, -8, GETDATE())),
+(@SheetId, 1, 2, '30', '50', 'Bob', DATEADD(MINUTE, -2, GETDATE()));
 ```
 
 ---
@@ -789,6 +1013,7 @@ public class SheetHub : Hub
             var guid = Guid.Parse(sheetId);
 
             var cell = await _db.Cells.FindAsync(guid, row, col);
+            string oldValue = cell?.Value; // 記錄舊值用於歷程
 
             if (cell == null)
             {
@@ -809,6 +1034,19 @@ public class SheetHub : Hub
                 cell.UpdatedBy = userName;
                 cell.UpdatedAt = DateTime.UtcNow;
             }
+
+            // 新增歷程記錄（Phase 3）
+            var history = new CellHistory
+            {
+                SheetId = guid,
+                RowIndex = row,
+                ColIndex = col,
+                OldValue = oldValue,
+                NewValue = value,
+                UpdatedBy = userName,
+                UpdatedAt = DateTime.UtcNow
+            };
+            _db.CellHistory.Add(history);
 
             await _db.SaveChangesAsync();
 
